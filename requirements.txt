@@ -1,0 +1,34 @@
+# Real-Time Video Upscaling & Enhancement System
+# Core dependencies
+
+# Deep Learning Framework (CUDA 12.1 compatible versions)
+torch==2.1.0+cu121
+torchvision==0.16.0+cu121
+torchaudio==2.1.0+cu121
+
+# Computer Vision (compatible versions)
+opencv-python<4.10
+Pillow>=9.5.0
+numpy<2.0
+
+# Video Processing
+ffmpeg-python>=0.2.0
+
+# Utilities
+tqdm>=4.65.0
+scipy>=1.10.0
+scikit-image>=0.21.0
+
+# Real-ESRGAN and related packages
+realesrgan>=0.3.0
+basicsr>=1.4.2
+facexlib>=0.3.0
+gfpgan>=1.3.8
+
+# Additional dependencies for Real-ESRGAN
+kornia>=0.6.0
+lpips>=0.1.4
+
+# Development and testing (optional)
+# pytest>=7.0.0
+# pytest-cov>=4.0.0
