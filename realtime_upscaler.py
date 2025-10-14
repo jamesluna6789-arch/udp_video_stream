@@ -20,10 +20,12 @@ import os
 import sys
 from pathlib import Path
 import logging
-from typing import Optional, Tuple, Union
 import subprocess
 import threading
 from queue import Queue, Empty
+import socket
+import struct
+from typing import Optional, Tuple, List
 
 # Configure logging
 logging.basicConfig(
@@ -1305,6 +1307,421 @@ class RealTimeUpscaler:
             logger.info(f"Frames processed: {frame_count}")
 
 
+
+class UDPAudioForwarder:
+    def __init__(self, source_host: str, source_port: int, 
+                 dest_host: str, dest_port: int, buffer_size: int = 4096,
+                 show_audio_info: bool = False):
+        """
+        Initialize the UDP Audio Forwarder.
+        
+        Args:
+            source_host: Source UDP host to listen on
+            source_port: Source UDP port to listen on
+            dest_host: Destination UDP host to forward to
+            dest_port: Destination UDP port to forward to
+            buffer_size: Buffer size for receiving data
+            show_audio_info: Show detailed audio format information
+        """
+        self.source_host = source_host
+        self.source_port = source_port
+        self.dest_host = dest_host
+        self.dest_port = dest_port
+        self.buffer_size = buffer_size
+        self.show_audio_info = show_audio_info
+        
+        self.source_socket: Optional[socket.socket] = None
+        self.dest_socket: Optional[socket.socket] = None
+        self.running = False
+        self.forward_thread: Optional[threading.Thread] = None
+        
+        # Audio frame processing
+        self.audio_buffer = bytearray()
+        self.detected_audio_format = None
+        self.frame_size = 0
+        self.sample_rate = 0
+        self.channels = 0
+        
+        # Statistics
+        self.bytes_received = 0
+        self.bytes_sent = 0
+        self.packets_received = 0
+        self.packets_sent = 0
+        self.start_time = None
+        
+        # Setup logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+        self.logger = logging.getLogger(__name__)
+
+    def detect_audio_format(self, data: bytes) -> Optional[str]:
+        """Detect the audio format from packet data."""
+        if len(data) < 4:
+            return None
+        
+        # Check for MP3 frame headers
+        if data.startswith(b'\xff\xfb') or data.startswith(b'\xff\xf3') or \
+           data.startswith(b'\xff\xf2') or data.startswith(b'\xff\xfa') or \
+           data.startswith(b'\xff\xf9'):
+            return "MP3"
+        
+        # Check for AAC ADTS headers
+        if len(data) >= 7 and (data[0] == 0xff and (data[1] & 0xf0) == 0xf0):
+            return "AAC"
+        
+        # Check for Opus
+        if data.startswith(b'Opus'):
+            return "OPUS"
+        
+        # Check for OGG
+        if data.startswith(b'OggS'):
+            return "OGG"
+        
+        # Check for FLAC
+        if data.startswith(b'fLaC'):
+            return "FLAC"
+        
+        # Check for WAV
+        if data.startswith(b'RIFF') and b'WAVE' in data[:12]:
+            return "WAV"
+        
+        return None
+
+    def parse_mp3_frame(self, data: bytes) -> Optional[dict]:
+        """Parse MP3 frame header to extract audio parameters."""
+        if len(data) < 4:
+            return None
+        
+        # MP3 frame header is 4 bytes
+        header = struct.unpack('>I', data[:4])[0]
+        
+        # Check sync word (first 11 bits should be 1)
+        if (header >> 21) != 0x7FF:
+            return None
+        
+        # Extract MP3 parameters
+        version = (header >> 19) & 0x3
+        layer = (header >> 17) & 0x3
+        bitrate_index = (header >> 12) & 0xF
+        sample_rate_index = (header >> 10) & 0x3
+        padding = (header >> 9) & 0x1
+        
+        # Sample rate table
+        sample_rates = [
+            [44100, 48000, 32000],  # MPEG-1
+            [22050, 24000, 16000],  # MPEG-2
+            [11025, 12000, 8000]    # MPEG-2.5
+        ]
+        
+        # Bitrate table (simplified)
+        bitrates = [
+            [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],  # MPEG-1 Layer III
+            [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],          # MPEG-2 Layer III
+        ]
+        
+        try:
+            sample_rate = sample_rates[version][sample_rate_index]
+            bitrate = bitrates[version][bitrate_index] * 1000  # Convert to bps
+            
+            # Calculate frame size
+            if layer == 1:  # Layer III
+                frame_size = int((144 * bitrate / sample_rate) + padding)
+            else:
+                frame_size = int((144 * bitrate / sample_rate) + padding)
+            
+            return {
+                'format': 'MP3',
+                'sample_rate': sample_rate,
+                'bitrate': bitrate,
+                'frame_size': frame_size,
+                'channels': 2  # Assume stereo for now
+            }
+        except (IndexError, ZeroDivisionError):
+            return None
+
+    def parse_aac_frame(self, data: bytes) -> Optional[dict]:
+        """Parse AAC ADTS frame header."""
+        if len(data) < 7:
+            return None
+        
+        # AAC ADTS header is 7 bytes
+        header = struct.unpack('>Q', b'\x00' + data[:7])[0]
+        
+        # Check sync word
+        if (header >> 48) != 0xFFF:
+            return None
+        
+        # Extract AAC parameters
+        profile = (header >> 46) & 0x3
+        sample_rate_index = (header >> 42) & 0xF
+        channel_config = (header >> 39) & 0x7
+        frame_length = (header >> 26) & 0x1FFF
+        
+        # Sample rate table
+        sample_rates = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 
+                       16000, 12000, 11025, 8000, 7350, 0, 0, 0]
+        
+        try:
+            sample_rate = sample_rates[sample_rate_index]
+            channels = 2 if channel_config == 2 else 1  # Simplified
+            
+            return {
+                'format': 'AAC',
+                'sample_rate': sample_rate,
+                'frame_size': frame_length,
+                'channels': channels
+            }
+        except IndexError:
+            return None
+
+    def extract_audio_frames(self, data: bytes) -> List[bytes]:
+        """Extract complete audio frames from incoming data."""
+        frames = []
+        self.audio_buffer.extend(data)
+        
+        while len(self.audio_buffer) >= 4:
+            # Try to detect format if not already detected
+            if not self.detected_audio_format:
+                self.detected_audio_format = self.detect_audio_format(self.audio_buffer)
+                if self.detected_audio_format:
+                    self.logger.info(f"Detected audio format: {self.detected_audio_format}")
+                    if self.show_audio_info:
+                        self.logger.info(f"Audio format details: {self.detected_audio_format}")
+            
+            frame_data = None
+            
+            if self.detected_audio_format == "MP3":
+                # Parse MP3 frame
+                frame_info = self.parse_mp3_frame(self.audio_buffer)
+                if frame_info and len(self.audio_buffer) >= frame_info['frame_size']:
+                    frame_data = bytes(self.audio_buffer[:frame_info['frame_size']])
+                    self.audio_buffer = self.audio_buffer[frame_info['frame_size']:]
+                    self.frame_size = frame_info['frame_size']
+                    self.sample_rate = frame_info['sample_rate']
+                    self.channels = frame_info['channels']
+                    
+                    if self.show_audio_info:
+                        self.logger.info(f"MP3 Frame: {frame_info['sample_rate']}Hz, {frame_info['bitrate']}bps, {frame_info['channels']}ch, {frame_info['frame_size']} bytes")
+            
+            elif self.detected_audio_format == "AAC":
+                # Parse AAC frame
+                frame_info = self.parse_aac_frame(self.audio_buffer)
+                if frame_info and len(self.audio_buffer) >= frame_info['frame_size']:
+                    frame_data = bytes(self.audio_buffer[:frame_info['frame_size']])
+                    self.audio_buffer = self.audio_buffer[frame_info['frame_size']:]
+                    self.frame_size = frame_info['frame_size']
+                    self.sample_rate = frame_info['sample_rate']
+                    self.channels = frame_info['channels']
+                    
+                    if self.show_audio_info:
+                        self.logger.info(f"AAC Frame: {frame_info['sample_rate']}Hz, {frame_info['channels']}ch, {frame_info['frame_size']} bytes")
+            
+            else:
+                # For unknown formats, try to extract based on common patterns
+                # Look for sync patterns or use fixed frame sizes
+                if len(self.audio_buffer) >= 1024:  # Assume 1KB frames for unknown formats
+                    frame_data = bytes(self.audio_buffer[:1024])
+                    self.audio_buffer = self.audio_buffer[1024:]
+                    self.frame_size = 1024
+            
+            if frame_data:
+                frames.append(frame_data)
+            else:
+                # No complete frame found, wait for more data
+                break
+        
+        return frames
+
+    def is_multicast_address(self, host: str) -> bool:
+        """Check if the given host is a multicast address."""
+        try:
+            # Convert to integer representation
+            addr = socket.inet_aton(host)
+            addr_int = struct.unpack('!I', addr)[0]
+            # Multicast addresses are in range 224.0.0.0 to 239.255.255.255
+            return 224 <= (addr_int >> 24) <= 239
+        except (socket.error, struct.error):
+            return False
+
+
+    def setup_sockets(self) -> bool:
+        """Setup source and destination UDP sockets."""
+        try:
+            # Setup source socket (receiver)
+            self.source_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.source_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # Check if source is multicast
+            if self.is_multicast_address(self.source_host):
+                # For multicast, bind to any interface and join the multicast group
+                self.source_socket.bind(('', self.source_port))
+                
+                # Join multicast group
+                mreq = struct.pack("4sl", socket.inet_aton(self.source_host), socket.INADDR_ANY)
+                self.source_socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+                
+                self.logger.info(f"Joined multicast group {self.source_host}:{self.source_port}")
+            else:
+                # For unicast, bind to the specific address
+                self.source_socket.bind((self.source_host, self.source_port))
+                self.logger.info(f"Source socket bound to {self.source_host}:{self.source_port}")
+            
+            self.source_socket.settimeout(1.0)  # 1 second timeout for graceful shutdown
+            
+            # Setup destination socket (sender)
+            self.dest_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            
+            # Check if destination is multicast
+            if self.is_multicast_address(self.dest_host):
+                # For multicast destination, set TTL (Time To Live)
+                self.dest_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+                self.logger.info(f"Destination configured for multicast {self.dest_host}:{self.dest_port}")
+            else:
+                self.logger.info(f"Destination socket configured for {self.dest_host}:{self.dest_port}")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to setup sockets: {e}")
+            return False
+
+    def forward_audio(self):
+        """Main forwarding loop - receives all packets, parses audio frames, and forwards everything."""
+        self.logger.info("Starting UDP packet forwarding with audio frame processing...")
+        self.start_time = time.time()
+        
+        # Statistics for processing
+        audio_frames_processed = 0
+        packets_forwarded = 0
+        
+        while self.running:
+            try:
+                # Receive data from source
+                data, addr = self.source_socket.recvfrom(self.buffer_size)
+                
+                if data:
+                    self.bytes_received += len(data)
+                    self.packets_received += 1
+                    
+                    # Extract and process audio frames (if any)
+                    audio_frames = self.extract_audio_frames(data)
+                    
+                    if audio_frames:
+                        # Forward each complete audio frame to destination
+                        print(f"FORWARDING {len(audio_frames)} audio frames to {self.dest_host}:{self.dest_port}")
+                        for frame in audio_frames:
+                            self.dest_socket.sendto(frame, (self.dest_host, self.dest_port))
+                            self.bytes_sent += len(frame)
+                            self.packets_sent += 1
+                            audio_frames_processed += 1
+                            
+                            if self.detected_audio_format:
+                                self.logger.debug(f"FORWARDED {self.detected_audio_format} frame from {addr} (size: {len(frame)} bytes, rate: {self.sample_rate}Hz)")
+                            else:
+                                self.logger.debug(f"FORWARDED audio frame from {addr} (size: {len(frame)} bytes)")
+                    # else:
+                    #     print(f"FORWARDING raw packet from {addr} (size: {len(data)} bytes)")
+                    #     # Forward raw packet if no audio frames extracted
+                    #     self.dest_socket.sendto(data, (self.dest_host, self.dest_port))
+                    #     self.bytes_sent += len(data)
+                    #     self.packets_sent += 1
+                    #     self.logger.debug(f"FORWARDED raw packet from {addr} (size: {len(data)} bytes)")
+                    
+                    packets_forwarded += 1
+                    
+                    # Log progress every 100 packets
+                    if self.packets_received % 100 == 0:
+                        self.log_statistics()
+                        if self.detected_audio_format:
+                            self.logger.info(f"Audio format: {self.detected_audio_format}, Frames processed: {audio_frames_processed}, Packets forwarded: {packets_forwarded}")
+                        else:
+                            self.logger.info(f"Packets forwarded: {packets_forwarded}")
+                        
+            except socket.timeout:
+                # Timeout is expected for graceful shutdown
+                continue
+            except Exception as e:
+                if self.running:
+                    self.logger.error(f"Error in packet forwarding loop: {e}")
+                break
+        
+        # Log final statistics
+        self.logger.info(f"Packet forwarding stopped. Final stats - Frames processed: {audio_frames_processed}, Packets forwarded: {packets_forwarded}")
+        if self.detected_audio_format:
+            self.logger.info(f"Detected format: {self.detected_audio_format}, Sample rate: {self.sample_rate}Hz, Channels: {self.channels}")
+
+    def log_statistics(self):
+        """Log current statistics."""
+        if self.start_time:
+            elapsed = time.time() - self.start_time
+            if elapsed > 0:
+                recv_rate = self.bytes_received / elapsed / 1024  # KB/s
+                send_rate = self.bytes_sent / elapsed / 1024  # KB/s
+                self.logger.info(
+                    f"Stats - Received: {self.packets_received} packets, "
+                    f"{self.bytes_received} bytes ({recv_rate:.1f} KB/s) | "
+                    f"Sent: {self.packets_sent} packets, "
+                    f"{self.bytes_sent} bytes ({send_rate:.1f} KB/s)"
+                )
+
+    def start(self):
+        """Start the audio forwarding service."""
+        if not self.setup_sockets():
+            return False
+        
+        self.running = True
+        self.forward_thread = threading.Thread(target=self.forward_audio, daemon=True)
+        self.forward_thread.start()
+        
+        self.logger.info("UDP Audio Forwarder started successfully")
+        return True
+
+    def stop(self):
+        """Stop the audio forwarding service."""
+        self.logger.info("Stopping UDP Audio Forwarder...")
+        self.running = False
+        
+        if self.forward_thread and self.forward_thread.is_alive():
+            self.forward_thread.join(timeout=2.0)
+        
+        # Leave multicast group if source was multicast
+        if self.source_socket and self.is_multicast_address(self.source_host):
+            try:
+                mreq = struct.pack("4sl", socket.inet_aton(self.source_host), socket.INADDR_ANY)
+                self.source_socket.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, mreq)
+                self.logger.info(f"Left multicast group {self.source_host}:{self.source_port}")
+            except Exception as e:
+                self.logger.warning(f"Failed to leave multicast group: {e}")
+        
+        # Close sockets
+        if self.source_socket:
+            self.source_socket.close()
+        if self.dest_socket:
+            self.dest_socket.close()
+        
+        # Log final statistics
+        self.log_statistics()
+        self.logger.info("UDP Audio Forwarder stopped")
+
+    def run_interactive(self):
+        """Run the forwarder with interactive control."""
+        if not self.start():
+            return False
+        
+        try:
+            self.logger.info("Press Ctrl+C to stop the forwarder")
+            while self.running:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            self.logger.info("Received interrupt signal")
+        finally:
+            self.stop()
+        
+        return True
+
+
 def convert_to_60fps(input_path: str, output_path: str, method: str = 'standard', 
                     quality: str = 'high', progress_callback=None):
     """
@@ -1423,6 +1840,50 @@ def convert_to_60fps(input_path: str, output_path: str, method: str = 'standard'
         logger.error(f"❌ Unexpected error during conversion: {e}")
         return False
 
+def thread_process_video(upscaler, args):
+    upscaler.process_video_file(
+        input_path=args.input,
+        output_path=args.output,
+        target_fps=args.fps,
+        real_time=args.real_time,
+    )
+
+def thread_process_audio(args):
+
+    # Remove protocol prefix if present (e.g., "udp://")
+    source_endpoint = args.input
+    if source_endpoint.startswith('udp://'):
+        source_endpoint = source_endpoint[6:]  # Remove "udp://"
+    
+    source_host, source_port = source_endpoint.rsplit(':', 1)
+    source_port = int(source_port)
+    
+    # Parse destination endpoint
+
+    # Remove protocol prefix if present (e.g., "udp://")
+    dest_endpoint = args.output
+    if dest_endpoint.startswith('udp://'):
+        dest_endpoint = dest_endpoint[6:]  # Remove "udp://"
+    
+    dest_host, dest_port = dest_endpoint.rsplit(':', 1)
+    dest_port = int(dest_port)
+    
+    
+    # Create and run forwarder
+    try:
+        forwarder = UDPAudioForwarder(
+            source_host=source_host,
+            source_port=source_port,
+            dest_host=dest_host,
+            dest_port=dest_port
+        )
+        print("Audio Forwarder started")
+        success = forwarder.run_interactive()
+    except KeyboardInterrupt:
+        logger.info("Processing interrupted by user")
+    except Exception as e:
+        logger.error(f"Processing failed: {e}")
+        sys.exit(1)  
 
 def main():
     """Main function with command-line interface"""
@@ -1568,6 +2029,7 @@ Examples:
             target_width=args.target_width,
             target_height=args.target_height
         )
+
         
         # Configure adaptive processing
         upscaler.stats['adaptive_quality'] = not args.no_adaptive
@@ -1575,6 +2037,7 @@ Examples:
             logger.info("Adaptive quality processing disabled - will process every frame")
         else:
             logger.info(f"Adaptive quality processing enabled - max skip ratio: {args.max_skip_ratio}")
+        
             
     except Exception as e:
         logger.error(f"Failed to initialize upscaler: {e}")
@@ -1584,19 +2047,10 @@ Examples:
     try:
         if args.input:
             # Process video file
-            upscaler.process_video_file(
-                input_path=args.input,
-                output_path=args.output,
-                target_fps=args.fps,
-                real_time=args.real_time,
-                skip_stream_test=args.skip_stream_test,
-                stream_test_method=args.stream_test_method,
-                max_skip_ratio=args.max_skip_ratio,
-                fps_method=args.fps_method,
-                fps_quality=args.fps_quality
-            )
-            
-        
+            # thread = threading.Thread(target=thread_process_video, args=(upscaler, args))
+            # thread_audio = threading.Thread(target=thread_process_audio, args=(args,))
+            thread_process_audio(args=args)
+            thread_process_video(upscaler=upscaler, args=args)
         else:
             # Process camera feed
             upscaler.process_camera_feed(
@@ -1611,6 +2065,9 @@ Examples:
         logger.error(f"Processing failed: {e}")
         sys.exit(1)
 
-
+    print("Audio Processing completed")
+    """Audio Processing"""
+    
+    
 if __name__ == "__main__":
     main()
