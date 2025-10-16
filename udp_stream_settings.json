@@ -1,0 +1,9 @@
+{
+  "input_url": "udp://@224.2.2.5:10001",
+  "output_url": "udp://224.2.2.100:60000",
+  "fps": "60",
+  "bitrate": "5000",
+  "vlc_path": "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe",
+  "auto_start": false,
+  "save_logs": true
+}

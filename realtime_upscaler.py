@@ -449,57 +449,6 @@ class RealTimeUpscaler:
             logger.error(f"Failed to create UDP capture: {e}")
             return None
     
-    def _create_udp_writer_alternative(self, udp_url: str, width: int, height: int, fps: int, target_fps: int = 60,
-                                      fps_method: str = 'standard', fps_quality: str = 'high') -> subprocess.Popen:
-        """Alternative UDP writer using different approach"""
-        try:
-            host, port = self._parse_udp_url(udp_url)
-            
-            print(f"FPS: {self._get_fps_filter(target_fps, fps_method)}")
-            # Alternative FFmpeg command - improved approach with buffer management
-            cmd = [
-                'ffmpeg', '-re',
-                '-use_wallclock_as_timestamps', '1',
-                '-fflags', '+genpts',
-                '-f', 'rawvideo',
-                '-s', f'{width}x{height}',
-                '-pix_fmt', 'bgr24',
-                '-r', str(fps / 2),  # Input frame rate
-                '-use_wallclock_as_timestamps', '1',
-                '-i', '-',
-                '-c:v', 'libx264',
-                '-preset', 'ultrafast',
-                '-tune', 'zerolatency',
-                '-filter:v', self._get_fps_filter(target_fps, fps_method),  # Convert to 60 FPS
-                '-g', str(target_fps * 2),  # GOP size = 2 seconds
-                '-keyint_min', str(target_fps),  # Keyframe every second
-                '-sc_threshold', '0',
-                '-bf', '0',  # No B-frames
-                '-refs', '1',  # Limit reference frames
-                '-flags', '+cgop',  # Closed GOP
-                '-muxrate', '4000k',
-                '-max_muxing_queue_size', '1024',  # Increase buffer size
-                '-f', 'mpegts',
-                f'udp://{host}:{port}?pkt_size=1316&buffer_size=65536',  # UDP with larger buffer
-                '-y'
-            ]
-            
-            logger.info(f"Starting alternative UDP stream to {host}:{port}")
-            
-            process = subprocess.Popen(
-                cmd, 
-                stdin=subprocess.PIPE, 
-                stdout=subprocess.DEVNULL, 
-                stderr=subprocess.PIPE,
-                bufsize=0
-            )
-            
-            return process
-            
-        except Exception as e:
-            logger.error(f"Failed to create alternative UDP writer: {e}")
-            return None
-
     def _get_fps_filter(self, target_fps: int, method: str) -> str:
         """
         Get FFmpeg FPS filter based on method
@@ -520,8 +469,8 @@ class RealTimeUpscaler:
         else:
             return f'fps={target_fps}'
     
-    def _create_udp_writer(self, udp_url: str, width: int, height: int, fps: int, target_fps: int = 60, 
-                          fps_method: str = 'standard', fps_quality: str = 'high') -> subprocess.Popen:
+    def _create_udp_writer(self, input_url: str, udp_url: str, width: int, height: int, fps: int, target_fps: int = 60, 
+                          fps_method: str = 'standard', fps_quality: str = 'high') -> bool:
         """
         Create FFmpeg process for UDP output with improved encoding parameters
         
@@ -534,143 +483,38 @@ class RealTimeUpscaler:
         """
         try:
             host, port = self._parse_udp_url(udp_url)
-            
-            # FFmpeg command for UDP output - fixed format with improved encoding and buffer management
-            # cmd = [
-            #     'ffmpeg', '-re',
-            #     '-use_wallclock_as_timestamps', '1',
-            #     '-fflags', '+genpts',
-            #     '-f', 'rawvideo',
-            #     '-s', f'{width}x{height}',
-            #     '-pix_fmt', 'bgr24',
-            #     '-r', '30',  # Input frame rate
-            #     '-i', '-',
-            #     '-c:v', 'libx264',
-            #     '-preset', 'veryfast',
-            #     '-tune', 'zerolatency',
-            #     '-x264-params', f'keyint=60:min-keyint=60:scenecut=0:repeat-headers=1',
-            #     '-filter:v', self._get_fps_filter(target_fps, fps_method),  # Convert to 60 FPS
-            #     '-g', str(target_fps),  # GOP size = 2 seconds
-            #     '-keyint_min', str(target_fps),  # Keyframe every second
-            #     # '-sc_threshold', '0',
-            #     '-bf', '0',  # No B-frames
-            #     '-refs', '1',  # Limit reference frames
-            #     '-flags', '+cgop',  # Closed GOP
-            #     '-muxrate', '15M',
-            #     '-maxrate', '15M',
-            #     '-bufsize', '30M',
-            #     # '-max_muxing_queue_size', '4096',  # Increase buffer size
-            #     '-f', 'mpegts',
-            #     f'udp://{host}:{port}?pkt_size=1316&ttl=8&buffer_size=2097152&overrun_nonfatal=1',  # UDP with larger buffer
-            #     # '-y'
-            # ]
 
             cmd = [
-                'ffmpeg',
-                '-f', 'rawvideo',
-                '-pix_fmt', 'bgr24',
-                '-s', f'{width}x{height}',
-                '-r', '60',  # Input frame rate
-                '-i', '-',
-                '-c:v', 'h264_nvenc',
-                '-preset', 'p4',
-                '-rc:v', 'vbr_hq',
-                '-b:v', '15M',
-                '-g','120',  # GOP size = 2 seconds
-                '-keyint_min', '60',  # Keyframe every second
-                '-bf', '2',  # No B-frames
-                '-profile:v', 'high',
-                '-b:v', '30M',
-                '-maxrate:v', '30M',
-                '-bufsize:v', '60M',
-                '-f', 'mpegts',
-                f'udp://{host}:{port}?pkt_size=1316&ttl=8&buffer_size=2097152&overrun_nonfatal=1',  # UDP with larger buffer
-                # '-y'
-            ]
-        
-
-            # cmd = [
-            #     'ffmpeg', '-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda',
-            #     '-f', 'rawvideo',
-            #     '-s', f'{width}x{height}',
-            #     '-pix_fmt', 'bgr24',
-            #     '-r', str(round(fps / 2)),  # Input frame rate
-            #     '-i', '-',
-            #     '-vf', 'scale=3840:2160:flags=lanczos,fps=60',
-            #     '-c:v', 'h264_nvenc',
-            #     '-preset', 'p4',
-            #     '-tune', 'll',
-            #     '-rc:v', 'vbr',
-            #     '-b:v', '25M',
-            #     '-maxrate', '40M',
-            #     '-bufsize', '80M',
-            #     '-g', str(target_fps),  # GOP size = 2 seconds
-            #     '-bf', '0',  # No B-frames
-            #     '-refs', '1',  # Limit reference frames
-            #     '-flags', '+cgop',  # Closed GOP
-            #     '-muxrate', '25000k',
-            #     '-f', 'mpegts',
-            #     f'udp://{host}:{port}?pkt_size=1316&ttl=8&buffer_size=2097152&overrun_nonfatal=1',  # UDP with larger buffer
-            #     # '-y'
-            # ]
+                r'C:\Program Files\VideoLAN\VLC\vlc.exe',
+                '-I', 'dummy',
+                input_url,
+                '--network-caching=1000',
+                '--sout',
+                '#duplicate{dst=std{access=udp,mux=ts,dst='+str(host)+':'+str(port)+'},transcode{vcodec=h264,vb=5000,scale=1,fps='+str(target_fps)+',scodec=mpga,acodec=mpga}}'
+            ]            
             
-            # cmd = [
-            #     'ffmpeg', '-hwaccel', 'cuda',
-            #     '-f', 'rawvideo',
-            #     '-s', f'{width}x{height}',
-            #     '-pix_fmt', 'bgr24',
-            #     '-r', str(fps),
-            #     '-i', '-',
-            #     '-c:v', 'h264_nvenc',
-            #     '-preset', 'p1',  # Faster preset
-            #     '-tune', 'll',
-            #     '-b:v', '10M',    # Lower bitrate
-            #     '-maxrate', '15M',
-            #     '-bufsize', '30M',
-            #     '-g', '30',       # Smaller GOP
-            #     '-f', 'mpegts',
-            #     f'udp://{host}:{port}?pkt_size=1316&ttl=8&buffer_size=2097152&overrun_nonfatal=1'
-            # ]
             logger.info(f"Starting UDP stream to {host}:{port}")
             logger.info(f"FFmpeg command: {' '.join(cmd)}")
             
-            process = subprocess.Popen(
-                cmd, 
-                stdin=subprocess.PIPE, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.PIPE,
-                bufsize=0,  # Unbuffered
-                preexec_fn=None if os.name == 'nt' else os.setsid,  # Process group for better cleanup
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
-            )
+            process =  subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = process.communicate()  # Wait for the process to complete (you can handle the output here)
+            if stdout:
+                logger.info(stdout.decode())
+            if stderr:
+                logger.error(stderr.decode())
+
+            # process = subprocess.Popen(
+            #     cmd, 
+            #     stdin=subprocess.PIPE, 
+            #     stdout=subprocess.PIPE, 
+            #     stderr=subprocess.PIPE,
+            #     bufsize=0,  # Unbuffered
+            #     preexec_fn=None if os.name == 'nt' else os.setsid,  # Process group for better cleanup
+            #     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
+            # )
             
             # Start a thread to monitor stderr for errors
-            def monitor_stderr():
-                try:
-                    for line in iter(process.stderr.readline, b''):
-                        if line:
-                            line_str = line.decode().strip()
-                            # Filter out common non-critical warnings
-                            if any(warning in line_str.lower() for warning in [
-                                'could not find ref with poc',
-                                'non-monotonous dts',
-                                'past duration',
-                                'deprecated pixel format',
-                                'frame size mismatch',
-                                'invalid data found'
-                            ]):
-                                logger.debug(f"FFmpeg warning: {line_str}")
-                            elif 'error' in line_str.lower() or 'failed' in line_str.lower():
-                                logger.warning(f"FFmpeg error: {line_str}")
-                            else:
-                                logger.debug(f"FFmpeg: {line_str}")
-                except Exception as e:
-                    logger.debug(f"Stderr monitoring error: {e}")
             
-            stderr_thread = threading.Thread(target=monitor_stderr, daemon=True)
-            stderr_thread.start()
-            
-            return process
             
         except Exception as e:
             logger.error(f"Failed to create UDP writer: {e}")
@@ -930,7 +774,7 @@ class RealTimeUpscaler:
             return False
     
     def process_video_file(self, input_path: str, output_path: str, 
-                          target_fps: int = 25, real_time: bool = False, 
+                          target_fps: int = 60, real_time: bool = False, 
                           skip_stream_test: bool = False, stream_test_method: str = 'both',
                           max_skip_ratio: float = 0.1, fps_method: str = 'standard', 
                           fps_quality: str = 'high'):
@@ -988,9 +832,6 @@ class RealTimeUpscaler:
                 # Set timeout for other stream types too
                 cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
                 cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
-        else:
-            # Regular file
-            cap = cv2.VideoCapture(input_path)
         
         if not cap.isOpened():
             logger.error(f"Failed to open input: {input_path}")
@@ -1006,7 +847,7 @@ class RealTimeUpscaler:
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
+        print(original_fps)
         # Calculate output dimensions - always use target resolution
         new_width = self.target_width
         new_height = self.target_height
@@ -1026,31 +867,19 @@ class RealTimeUpscaler:
             logger.info(f"Output detected as stream: {output_path}")
             if self._is_udp_stream(output_path):
                 # Try primary UDP writer first - always output 60 FPS
-                udp_writer = self._create_udp_writer(output_path, new_width, new_height, target_fps, 60, 
+                udp_writer = self._create_udp_writer(input_path, output_path, new_width, new_height, target_fps, 60, 
                                                    fps_method, fps_quality)
-                if not udp_writer:
-                    logger.warning("Primary UDP writer failed, trying alternative method...")
-                    udp_writer = self._create_udp_writer_alternative(output_path, new_width, new_height, target_fps, 60,
-                                                                    fps_method, fps_quality)
                 
                 if not udp_writer:
                     logger.error(f"Failed to create UDP output stream: {output_path}")
-                    cap.release()
                     return
             else:
                 # For other stream types, we'll need to implement specific handlers
                 logger.error(f"Stream output type not yet supported: {output_path}")
-                cap.release()
                 return
         else:
-            # Regular file output - use 60 FPS directly
-            fourcc = cv2.VideoWriter_fourcc(*'H264')
-            out = cv2.VideoWriter(output_path, fourcc, 60.0, (new_width, new_height))  # Always 60 FPS
-            
-            if not out.isOpened():
-                logger.error(f"Failed to create output video: {output_path}")
-                cap.release()
-                return
+            logger.error(f"Failed to create output video: {output_path}")
+            return
         
         # Process frames
         frame_count = 0
@@ -1059,145 +888,145 @@ class RealTimeUpscaler:
         last_time = start_time
         self.stats['target_fps'] = target_fps
         
-        try:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+        # try:
+        #     while True:
+        #         ret, frame = cap.read()
+        #         if not ret:
+        #             break
                 
-                frame_start = time.time()
+        #         frame_start = time.time()
                 
-                # Calculate current FPS for adaptive processing
-                current_time = time.time()
-                elapsed = current_time - start_time
-                current_fps = frame_count / elapsed if elapsed > 0 else 0
+        #         # Calculate current FPS for adaptive processing
+        #         current_time = time.time()
+        #         elapsed = current_time - start_time
+        #         current_fps = frame_count / elapsed if elapsed > 0 else 0
                 
-                # Check if we should skip this frame
-                if frame_count > 0:  # Don't skip first frame
-                    last_processing_time = self.stats['processing_times'][-1] if self.stats['processing_times'] else 0
-                    if self._should_skip_frame(target_fps, current_fps, last_processing_time, 
-                                             frame_count, frames_skipped, max_skip_ratio):
-                        frames_skipped += 1
-                        self.stats['frames_dropped'] += 1
-                        continue
+        #         # Check if we should skip this frame
+        #         if frame_count > 0:  # Don't skip first frame
+        #             last_processing_time = self.stats['processing_times'][-1] if self.stats['processing_times'] else 0
+        #             if self._should_skip_frame(target_fps, current_fps, last_processing_time, 
+        #                                      frame_count, frames_skipped, max_skip_ratio):
+        #                 frames_skipped += 1
+        #                 self.stats['frames_dropped'] += 1
+        #                 continue
                 
-                # Always use calculated scale factor for consistent output resolution
-                upscaled_frame = self.upscale_frame(frame, scale_factor)
+        #         # Always use calculated scale factor for consistent output resolution
+        #         upscaled_frame = self.upscale_frame(frame, scale_factor)
                 
-                # Record processing time
-                processing_time = time.time() - frame_start
-                self.stats['processing_times'].append(processing_time)
+        #         # Record processing time
+        #         processing_time = time.time() - frame_start
+        #         self.stats['processing_times'].append(processing_time)
                 
-                # Keep only last 30 processing times for rolling average
-                if len(self.stats['processing_times']) > 30:
-                    self.stats['processing_times'] = self.stats['processing_times'][-30:]
+        #         # Keep only last 30 processing times for rolling average
+        #         if len(self.stats['processing_times']) > 30:
+        #             self.stats['processing_times'] = self.stats['processing_times'][-30:]
                 
-                # Write frame to output
-                if udp_writer:
-                    # Write to UDP stream using robust method with proper timing
-                    max_retries = 3
-                    success = False
+        #         # Write frame to output
+        #         if udp_writer:
+        #             # Write to UDP stream using robust method with proper timing
+        #             max_retries = 3
+        #             success = False
 
-                    for retry in range(max_retries):
-                        if self._write_frame_to_ffmpeg(upscaled_frame, udp_writer, new_width, new_height, 
-                                                     original_fps, 60.0):
-                            success = True
-                            break
-                        else:
-                            logger.warning(f"Frame write failed, retry {retry + 1}/{max_retries}")
-                            time.sleep(0.01)  # Small delay before retry
+        #             for retry in range(max_retries):
+        #                 if self._write_frame_to_ffmpeg(upscaled_frame, udp_writer, new_width, new_height, 
+        #                                              original_fps, 60.0):
+        #                     success = True
+        #                     break
+        #                 else:
+        #                     logger.warning(f"Frame write failed, retry {retry + 1}/{max_retries}")
+        #                     time.sleep(0.01)  # Small delay before retry
                     
-                    if not success:
-                        logger.error("Failed to write frame to FFmpeg process after retries")
-                        break
-                elif out:
-                    # Write to file
-                    out.write(upscaled_frame)
+        #             if not success:
+        #                 logger.error("Failed to write frame to FFmpeg process after retries")
+        #                 break
+        #         elif out:
+        #             # Write to file
+        #             out.write(upscaled_frame)
                 
-                frame_count += 1
-                self.stats['frames_processed'] += 1
+        #         frame_count += 1
+        #         self.stats['frames_processed'] += 1
                 
-                # Calculate and log progress with performance metrics
-                if frame_count % 10 == 0:
-                    current_time = time.time()
-                    elapsed = current_time - start_time
-                    fps = frame_count / elapsed
-                    avg_processing_time = sum(self.stats['processing_times']) / len(self.stats['processing_times']) if self.stats['processing_times'] else 0
+        #         # Calculate and log progress with performance metrics
+        #         if frame_count % 10 == 0:
+        #             current_time = time.time()
+        #             elapsed = current_time - start_time
+        #             fps = frame_count / elapsed
+        #             avg_processing_time = sum(self.stats['processing_times']) / len(self.stats['processing_times']) if self.stats['processing_times'] else 0
                     
-                    progress = (frame_count / total_frames) * 100 if not is_input_stream else 0
-                    eta = (total_frames - frame_count) / fps if fps > 0 and not is_input_stream else 0
+        #             progress = (frame_count / total_frames) * 100 if not is_input_stream else 0
+        #             eta = (total_frames - frame_count) / fps if fps > 0 and not is_input_stream else 0
                     
-                    logger.info(f"Progress: {progress:.1f}% | "
-                              f"FPS: {fps:.1f}/{target_fps} | "
-                              f"Process Time: {avg_processing_time:.3f}s | "
-                              f"Skipped: {frames_skipped} | "
-                              f"Frame: {frame_count}")
+        #             logger.info(f"Progress: {progress:.1f}% | "
+        #                       f"FPS: {fps:.1f}/{target_fps} | "
+        #                       f"Process Time: {avg_processing_time:.3f}s | "
+        #                       f"Skipped: {frames_skipped} | "
+        #                       f"Frame: {frame_count}")
                 
-                # Real-time mode: maintain target FPS
-                if real_time:
-                    frame_time = time.time() - frame_start
-                    target_frame_time = 1.0 / target_fps
-                    if frame_time < target_frame_time:
-                        time.sleep(target_frame_time - frame_time)
+        #         # Real-time mode: maintain target FPS
+        #         if real_time:
+        #             frame_time = time.time() - frame_start
+        #             target_frame_time = 1.0 / target_fps
+        #             if frame_time < target_frame_time:
+        #                 time.sleep(target_frame_time - frame_time)
                 
-        except KeyboardInterrupt:
-            logger.info("Processing interrupted by user")
+        # except KeyboardInterrupt:
+        #     logger.info("Processing interrupted by user")
         
-        finally:
-            # Cleanup
-            cap.release()
+        # finally:
+        #     # Cleanup
+        #     cap.release()
             
-            if out:
-                out.release()
+        #     if out:
+        #         out.release()
             
-            if udp_writer:
-                try:
-                    # Close stdin to signal end of input
-                    if udp_writer.stdin and not udp_writer.stdin.closed:
-                        udp_writer.stdin.close()
+        #     if udp_writer:
+        #         try:
+        #             # Close stdin to signal end of input
+        #             if udp_writer.stdin and not udp_writer.stdin.closed:
+        #                 udp_writer.stdin.close()
                     
-                    # Wait for process to finish with timeout
-                    try:
-                        udp_writer.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        logger.warning("FFmpeg process did not terminate gracefully, killing...")
-                        try:
-                            udp_writer.kill()
-                            udp_writer.wait(timeout=2)
-                        except:
-                            pass
+        #             # Wait for process to finish with timeout
+        #             try:
+        #                 udp_writer.wait(timeout=5)
+        #             except subprocess.TimeoutExpired:
+        #                 logger.warning("FFmpeg process did not terminate gracefully, killing...")
+        #                 try:
+        #                     udp_writer.kill()
+        #                     udp_writer.wait(timeout=2)
+        #                 except:
+        #                     pass
                     
-                    # Check return code
-                    if udp_writer.returncode != 0:
-                        logger.warning(f"FFmpeg process exited with code {udp_writer.returncode}")
+        #             # Check return code
+        #             if udp_writer.returncode != 0:
+        #                 logger.warning(f"FFmpeg process exited with code {udp_writer.returncode}")
                         
-                except Exception as e:
-                    logger.warning(f"Error closing UDP writer: {e}")
-                    try:
-                        if udp_writer.poll() is None:  # Process still running
-                            udp_writer.kill()
-                            udp_writer.wait(timeout=1)
-                    except:
-                        pass
+        #         except Exception as e:
+        #             logger.warning(f"Error closing UDP writer: {e}")
+        #             try:
+        #                 if udp_writer.poll() is None:  # Process still running
+        #                     udp_writer.kill()
+        #                     udp_writer.wait(timeout=1)
+        #             except:
+        #                 pass
             
-            # Final statistics
-            total_time = time.time() - start_time
-            avg_fps = frame_count / total_time if total_time > 0 else 0
-            avg_processing_time = sum(self.stats['processing_times']) / len(self.stats['processing_times']) if self.stats['processing_times'] else 0
-            efficiency = (avg_fps / target_fps) * 100 if target_fps > 0 else 0
+        #     # Final statistics
+        #     total_time = time.time() - start_time
+        #     avg_fps = frame_count / total_time if total_time > 0 else 0
+        #     avg_processing_time = sum(self.stats['processing_times']) / len(self.stats['processing_times']) if self.stats['processing_times'] else 0
+        #     efficiency = (avg_fps / target_fps) * 100 if target_fps > 0 else 0
             
-            logger.info(f"Processing completed!")
-            logger.info(f"Total time: {total_time:.1f}s")
-            logger.info(f"Average FPS: {avg_fps:.1f}/{target_fps} ({efficiency:.1f}% efficiency)")
-            logger.info(f"Frames processed: {frame_count}")
-            logger.info(f"Frames skipped: {frames_skipped}")
-            logger.info(f"Average processing time: {avg_processing_time:.3f}s per frame")
-            logger.info(f"Target frame time: {1.0/target_fps:.3f}s per frame")
+        #     logger.info(f"Processing completed!")
+        #     logger.info(f"Total time: {total_time:.1f}s")
+        #     logger.info(f"Average FPS: {avg_fps:.1f}/{target_fps} ({efficiency:.1f}% efficiency)")
+        #     logger.info(f"Frames processed: {frame_count}")
+        #     logger.info(f"Frames skipped: {frames_skipped}")
+        #     logger.info(f"Average processing time: {avg_processing_time:.3f}s per frame")
+        #     logger.info(f"Target frame time: {1.0/target_fps:.3f}s per frame")
             
-            if is_output_stream:
-                logger.info(f"Stream sent to: {output_path}")
-            else:
-                logger.info(f"Output saved to: {output_path}")
+        #     if is_output_stream:
+        #         logger.info(f"Stream sent to: {output_path}")
+        #     else:
+        #         logger.info(f"Output saved to: {output_path}")
     
     def process_camera_feed(self, camera_id: int = 0, output_path: Optional[str] = None,
                            target_fps: int = 15):
@@ -1423,6 +1252,18 @@ def convert_to_60fps(input_path: str, output_path: str, method: str = 'standard'
         logger.error(f"❌ Unexpected error during conversion: {e}")
         return False
 
+def process_video_file(upscaler, args):
+    upscaler.process_video_file(
+        input_path=args.input,
+        output_path=args.output,
+        target_fps=args.fps,
+        real_time=args.real_time,
+        skip_stream_test=args.skip_stream_test,
+        stream_test_method=args.stream_test_method,
+        max_skip_ratio=args.max_skip_ratio,
+        fps_method=args.fps_method,
+        fps_quality=args.fps_quality
+    )
 
 def main():
     """Main function with command-line interface"""
@@ -1584,26 +1425,13 @@ Examples:
     try:
         if args.input:
             # Process video file
-            upscaler.process_video_file(
-                input_path=args.input,
-                output_path=args.output,
-                target_fps=args.fps,
-                real_time=args.real_time,
-                skip_stream_test=args.skip_stream_test,
-                stream_test_method=args.stream_test_method,
-                max_skip_ratio=args.max_skip_ratio,
-                fps_method=args.fps_method,
-                fps_quality=args.fps_quality
-            )
-            
-        
+            process_thread = threading.Thread(target=  process_video_file, args=(upscaler, args))
+            process_thread.daemon = True
+            process_thread.start()
+            process_thread.join()
         else:
-            # Process camera feed
-            upscaler.process_camera_feed(
-                camera_id=args.camera,
-                output_path=args.output,
-                target_fps=args.fps
-            )
+            logger.error(f"Processing failed: {e}")
+            sys.exit(1)
     
     except KeyboardInterrupt:
         logger.info("Processing interrupted by user")

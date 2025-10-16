@@ -1,0 +1,100 @@
+{
+    "example_configurations": {
+        "basic_streaming": {
+            "description": "Basic UDP stream forwarding",
+            "input_url": "udp://@192.168.1.100:1234",
+            "output_url": "udp://192.168.1.200:5678",
+            "fps": "30",
+            "bitrate": "5000",
+            "quality": "High"
+        },
+        "high_quality_streaming": {
+            "description": "High quality streaming for professional use",
+            "input_url": "udp://@192.168.1.100:1234",
+            "output_url": "udp://192.168.1.200:5678",
+            "fps": "60",
+            "bitrate": "10000",
+            "quality": "Ultra"
+        },
+        "low_bandwidth_streaming": {
+            "description": "Low bandwidth streaming for limited networks",
+            "input_url": "udp://@192.168.1.100:1234",
+            "output_url": "udp://192.168.1.200:5678",
+            "fps": "15",
+            "bitrate": "2000",
+            "quality": "Low"
+        },
+        "broadcast_streaming": {
+            "description": "Broadcast quality streaming",
+            "input_url": "udp://@192.168.1.100:1234",
+            "output_url": "udp://192.168.1.200:5678",
+            "fps": "25",
+            "bitrate": "8000",
+            "quality": "High"
+        }
+    },
+    "vlc_settings": {
+        "default_vlc_path": "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe",
+        "network_caching": 1000,
+        "connection_timeout": 10
+    },
+    "quality_presets": {
+        "Low": {
+            "description": "Fast encoding, higher compression",
+            "preset": "ultrafast",
+            "crf": "28",
+            "use_case": "Low bandwidth, real-time streaming"
+        },
+        "Medium": {
+            "description": "Balanced quality and performance",
+            "preset": "fast",
+            "crf": "23",
+            "use_case": "General purpose streaming"
+        },
+        "High": {
+            "description": "Better quality, moderate performance impact",
+            "preset": "medium",
+            "crf": "20",
+            "use_case": "High quality streaming"
+        },
+        "Ultra": {
+            "description": "Best quality, higher resource usage",
+            "preset": "slow",
+            "crf": "18",
+            "use_case": "Professional broadcasting"
+        }
+    },
+    "fps_options": {
+        "15": "Low motion content, bandwidth limited",
+        "24": "Cinematic content",
+        "25": "PAL broadcast standard",
+        "30": "NTSC broadcast standard, general use",
+        "50": "PAL high frame rate",
+        "60": "High frame rate, gaming content"
+    },
+    "bitrate_guidelines": {
+        "1000": "Very low quality, 240p equivalent",
+        "2000": "Low quality, 360p equivalent",
+        "5000": "Medium quality, 720p equivalent",
+        "8000": "High quality, 1080p equivalent",
+        "10000": "Very high quality, 1080p+ equivalent",
+        "15000": "Ultra high quality, 4K equivalent"
+    },
+    "network_considerations": {
+        "local_network": {
+            "description": "Streaming within local network",
+            "recommended_bitrate": "5000-10000",
+            "latency": "Low"
+        },
+        "internet_streaming": {
+            "description": "Streaming over internet",
+            "recommended_bitrate": "2000-5000",
+            "latency": "Medium to High"
+        },
+        "professional_broadcast": {
+            "description": "Professional broadcast quality",
+            "recommended_bitrate": "8000-15000",
+            "latency": "Low"
+        }
+    }
+}
